@@ -1,0 +1,32 @@
+{
+  "name": "@abdut7/acc-engine",
+  "version": "0.0.1",
+  "description": "Double-entry accounting engine for MongoDB (TypeScript/Node).",
+  "license": "MIT",
+  "author": "Abdu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abdut7/acc-engine.git"
+  },
+  "keywords": [
+    "accounting",
+    "bookkeeping",
+    "double-entry",
+    "mongodb",
+    "ledger",
+    "finance"
+  ],
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./index.cjs",
+      "import": "./index.mjs",
+      "types": "./index.d.ts"
+    }
+  },
+  "peerDependencies": {
+    "mongodb": "^6.0.0"
+  }
+}

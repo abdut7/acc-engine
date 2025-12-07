@@ -764,5 +764,5 @@ exports.postJournal = postJournal;
 exports.seedAccounts = seedAccounts;
 exports.updateAccount = updateAccount;
 exports.voidJournal = voidJournal;
-//# sourceMappingURL=index.js.map
-//# sourceMappingURL=index.js.map
+//# sourceMappingURL=index.cjs.map
+//# sourceMappingURL=index.cjs.map
