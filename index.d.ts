@@ -20,6 +20,7 @@ interface Account {
     group: string;
     origin: AccountOrigin;
     isActive: boolean;
+    chrStatus: string;
     parentAccountKey?: string | null;
     extra?: Record<string, any>;
     createdAt: Date;
@@ -34,10 +35,12 @@ interface Journal {
     datetime: Date;
     referenceType?: string;
     referenceId?: string;
+    chrStatus: string;
     voided: boolean;
     voidReason?: string | null;
     createdAt: Date;
     updatedAt: Date;
+    [key: string]: any;
 }
 interface TransactionLine {
     _id: ObjectId;
@@ -48,9 +51,11 @@ interface TransactionLine {
     credit: number;
     meta?: Record<string, any>;
     datetime: Date;
+    chrStatus: string;
     voided: boolean;
     createdAt: Date;
     updatedAt: Date;
+    [key: string]: any;
 }
 interface CreateAccountInput {
     key: string;
@@ -76,6 +81,7 @@ interface TransactionLineInput {
     debit?: number;
     credit?: number;
     meta?: Record<string, any>;
+    extra?: Record<string, any>;
 }
 interface PostJournalInput {
     memo: string;
@@ -83,6 +89,8 @@ interface PostJournalInput {
     referenceType?: string;
     referenceId?: string;
     lines: TransactionLineInput[];
+    extra?: Record<string, any>;
+    transactionExtra?: Record<string, any>;
 }
 interface ApplyOpeningBalanceInput {
     accountKey: string;
@@ -180,9 +188,21 @@ declare function listAccounts(filter: Partial<Account> & {
 }, ctx: AccountingDbContext): Promise<Account[]>;
 declare function applyOpeningBalance(data: ApplyOpeningBalanceInput, ctx: AccountingDbContext): Promise<PostJournalResult | null>;
 declare function getAccountHierarchy(ctx: AccountingDbContext): Promise<AccountHierarchyNode[]>;
+declare function getChartOfAccounts(ctx: AccountingDbContext): Promise<AccountHierarchyNode[]>;
+declare function getChildAccounts(identifier: string | ObjectId, ctx: AccountingDbContext): Promise<Account[]>;
+declare function getParentAccounts(identifier: string | ObjectId, ctx: AccountingDbContext): Promise<Account[]>;
 
+interface VoidJournalResult {
+    journalsVoided: number;
+    transactionsVoided: number;
+}
 declare function postJournal(data: PostJournalInput, ctx: AccountingDbContext): Promise<PostJournalResult>;
 declare function voidJournal(journalId: string | ObjectId, reason: string, ctx: AccountingDbContext): Promise<boolean>;
+declare function voidJournalsByIdentifier(identifier: {
+    journalId?: string | ObjectId;
+    referenceId?: string;
+    referenceType?: string;
+}, reason: string, ctx: AccountingDbContext): Promise<VoidJournalResult>;
 declare function getJournal(journalId: string | ObjectId, ctx: AccountingDbContext): Promise<PostJournalResult | null>;
 
 declare function getAccountBalance(data: {
@@ -215,4 +235,4 @@ declare function getBalanceSheet(data: {
 declare function ensureAccountingIndexes(ctx: AccountingDbContext): Promise<string[]>;
 declare function seedAccounts(accounts: AccountSeed[], ctx: AccountingDbContext): Promise<Account[]>;
 
-export { type Account, type AccountBalanceResult, type AccountHierarchyNode, type AccountLedgerItem, type AccountLedgerResult, AccountNotFoundError, type AccountOrigin, type AccountParentGroup, type AccountSeed, type AccountSeedInput, type AccountType, type AccountingDbContext, AccountingError, type ApplyOpeningBalanceInput, type BalanceSheetResult, type CreateAccountInput, DatabaseError, DoubleEntryError, type Journal, type PostJournalInput, type PostJournalResult, type ProfitAndLossResult, type TransactionLine, type TransactionLineInput, type TrialBalanceLine, type TrialBalanceResult, type UpdateAccountInput, ValidationError, applyOpeningBalance, createAccount, deactivateAccount, ensureAccountingIndexes, getAccountBalance, getAccountByCode, getAccountByKey, getAccountHierarchy, getAccountLedger, getBalanceSheet, getJournal, getProfitAndLoss, getTrialBalance, listAccounts, postJournal, seedAccounts, updateAccount, voidJournal };
+export { type Account, type AccountBalanceResult, type AccountHierarchyNode, type AccountLedgerItem, type AccountLedgerResult, AccountNotFoundError, type AccountOrigin, type AccountParentGroup, type AccountSeed, type AccountSeedInput, type AccountType, type AccountingDbContext, AccountingError, type ApplyOpeningBalanceInput, type BalanceSheetResult, type CreateAccountInput, DatabaseError, DoubleEntryError, type Journal, type PostJournalInput, type PostJournalResult, type ProfitAndLossResult, type TransactionLine, type TransactionLineInput, type TrialBalanceLine, type TrialBalanceResult, type UpdateAccountInput, ValidationError, applyOpeningBalance, createAccount, deactivateAccount, ensureAccountingIndexes, getAccountBalance, getAccountByCode, getAccountByKey, getAccountHierarchy, getAccountLedger, getBalanceSheet, getChartOfAccounts, getChildAccounts, getJournal, getParentAccounts, getProfitAndLoss, getTrialBalance, listAccounts, postJournal, seedAccounts, updateAccount, voidJournal, voidJournalsByIdentifier };

@@ -36,6 +36,13 @@ var DatabaseError = class extends AccountingError {
 };
 
 // src/utils.ts
+var DEFAULT_CHR_STATUS = "N";
+function withChrStatusFilter(filter) {
+  return { chrStatus: DEFAULT_CHR_STATUS, ...filter || {} };
+}
+function withChrStatusDocument(doc) {
+  return { chrStatus: DEFAULT_CHR_STATUS, ...doc };
+}
 async function execute(operation) {
   try {
     return await operation();
@@ -86,7 +93,7 @@ function postJournal(data, ctx) {
         `Journal is not balanced. Debit: ${totalDebit}, Credit: ${totalCredit}`
       );
     }
-    const accounts = await ctx.db.collection(ACCT_COLLECTION).find({ key: { $in: Array.from(accountKeys) } }, { session: ctx.session }).toArray();
+    const accounts = await ctx.db.collection(ACCT_COLLECTION).find(withChrStatusFilter({ key: { $in: Array.from(accountKeys) } }), { session: ctx.session }).toArray();
     const accountMap = /* @__PURE__ */ new Map();
     accounts.forEach((a) => accountMap.set(a.key, a));
     const missingKeys = Array.from(accountKeys).filter((k) => !accountMap.has(k));
@@ -99,8 +106,9 @@ function postJournal(data, ctx) {
     }
     const now = /* @__PURE__ */ new Date();
     const journalId = new mongodb.ObjectId();
-    const journalDoc = {
+    const journalDoc = withChrStatusDocument({
       _id: journalId,
+      ...data.extra || {},
       memo: data.memo,
       datetime: data.datetime,
       referenceType: data.referenceType,
@@ -108,11 +116,13 @@ function postJournal(data, ctx) {
       voided: false,
       createdAt: now,
       updatedAt: now
-    };
+    });
     const transactionDocs = data.lines.map((line) => {
       const account = accountMap.get(line.accountKey);
-      return {
+      const extra = { ...data.transactionExtra || {}, ...line.extra || {} };
+      return withChrStatusDocument({
         _id: new mongodb.ObjectId(),
+        ...extra,
         journalId,
         accountKey: line.accountKey,
         accountCode: account.code,
@@ -124,7 +134,7 @@ function postJournal(data, ctx) {
         voided: false,
         createdAt: now,
         updatedAt: now
-      };
+      });
     });
     await ctx.db.collection(JOURNAL_COLLECTION).insertOne(journalDoc, { session: ctx.session });
     await ctx.db.collection(TX_COLLECTION).insertMany(transactionDocs, { session: ctx.session });
@@ -137,13 +147,15 @@ function postJournal(data, ctx) {
 function voidJournal(journalId, reason, ctx) {
   return execute(async () => {
     const jId = new mongodb.ObjectId(journalId);
+    const updatedAt = /* @__PURE__ */ new Date();
     const result = await ctx.db.collection(JOURNAL_COLLECTION).findOneAndUpdate(
-      { _id: jId, voided: false },
+      withChrStatusFilter({ _id: jId, voided: false }),
       {
         $set: {
           voided: true,
+          chrStatus: "D",
           voidReason: reason,
-          updatedAt: /* @__PURE__ */ new Date()
+          updatedAt
         }
       },
       { session: ctx.session }
@@ -152,11 +164,12 @@ function voidJournal(journalId, reason, ctx) {
       throw new ValidationError(`Journal not found or already voided: ${journalId}`);
     }
     await ctx.db.collection(TX_COLLECTION).updateMany(
-      { journalId: jId },
+      withChrStatusFilter({ journalId: jId }),
       {
         $set: {
           voided: true,
-          updatedAt: /* @__PURE__ */ new Date()
+          chrStatus: "D",
+          updatedAt
         }
       },
       { session: ctx.session }
@@ -164,15 +177,64 @@ function voidJournal(journalId, reason, ctx) {
     return true;
   });
 }
+function voidJournalsByIdentifier(identifier, reason, ctx) {
+  return execute(async () => {
+    if (!identifier.journalId && !identifier.referenceId) {
+      throw new ValidationError("journalId or referenceId is required");
+    }
+    const journalFilter = { voided: false };
+    if (identifier.journalId) {
+      journalFilter._id = new mongodb.ObjectId(identifier.journalId);
+    }
+    if (identifier.referenceId) {
+      journalFilter.referenceId = identifier.referenceId;
+      if (identifier.referenceType) journalFilter.referenceType = identifier.referenceType;
+    }
+    const journals = await ctx.db.collection(JOURNAL_COLLECTION).find(withChrStatusFilter(journalFilter), { session: ctx.session }).toArray();
+    if (journals.length === 0) {
+      throw new ValidationError("Journal not found or already voided");
+    }
+    const journalIds = journals.map((j) => j._id);
+    const updatedAt = /* @__PURE__ */ new Date();
+    const journalResult = await ctx.db.collection(JOURNAL_COLLECTION).updateMany(
+      withChrStatusFilter({ _id: { $in: journalIds } }),
+      {
+        $set: {
+          voided: true,
+          chrStatus: "D",
+          voidReason: reason,
+          updatedAt
+        }
+      },
+      { session: ctx.session }
+    );
+    const txResult = await ctx.db.collection(TX_COLLECTION).updateMany(
+      withChrStatusFilter({ journalId: { $in: journalIds } }),
+      {
+        $set: {
+          voided: true,
+          chrStatus: "D",
+          updatedAt
+        }
+      },
+      { session: ctx.session }
+    );
+    return {
+      journalsVoided: journalResult.modifiedCount,
+      transactionsVoided: txResult.modifiedCount
+    };
+  });
+}
 function getJournal(journalId, ctx) {
   return execute(async () => {
     const jId = new mongodb.ObjectId(journalId);
+    const chrStatusFilter = { chrStatus: { $in: [DEFAULT_CHR_STATUS, "D"] } };
     const journal = await ctx.db.collection(JOURNAL_COLLECTION).findOne(
-      { _id: jId },
+      { ...chrStatusFilter, _id: jId },
       { session: ctx.session }
     );
     if (!journal) return null;
-    const transactions = await ctx.db.collection(TX_COLLECTION).find({ journalId: jId }, { session: ctx.session }).toArray();
+    const transactions = await ctx.db.collection(TX_COLLECTION).find({ ...chrStatusFilter, journalId: jId }, { session: ctx.session }).toArray();
     return { journal, transactions };
   });
 }
@@ -189,7 +251,8 @@ var DEFAULT_OPENING_BALANCE_ACCOUNT = {
   group: "Opening Balance",
   origin: "dynamicSystem",
   isActive: true,
-  extra: { system: true }
+  extra: { system: true },
+  chrStatus: "N"
 };
 function validateAccountStructure(data) {
   if (!data.key || !data.code || !data.name || !data.type || !data.parentGroup || !data.group) {
@@ -216,7 +279,7 @@ async function validateParent(ctx, accountKey, parentKey) {
   if (accountKey === parentKey) {
     throw new ValidationError("Account cannot be its own parent");
   }
-  const parent = await ctx.db.collection(COLLECTION).findOne({ key: parentKey }, sessionOptions(ctx));
+  const parent = await ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ key: parentKey }), sessionOptions(ctx));
   if (!parent) {
     throw new ValidationError(`Parent account '${parentKey}' not found`);
   }
@@ -233,7 +296,7 @@ async function validateParent(ctx, accountKey, parentKey) {
     }
     visited.add(currentKey);
     const node = await ctx.db.collection(COLLECTION).findOne(
-      { key: currentKey },
+      withChrStatusFilter({ key: currentKey }),
       { projection: { parentAccountKey: 1 }, ...sessionOptions(ctx) }
     );
     if (!node) break;
@@ -247,28 +310,28 @@ function isDebitNormal(account) {
 }
 async function ensureOpeningBalanceOffsetAccount(ctx, offsetKey) {
   const keyToLookup = offsetKey || DEFAULT_OPENING_BALANCE_ACCOUNT.key;
-  const existing = await ctx.db.collection(COLLECTION).findOne({ key: keyToLookup }, sessionOptions(ctx));
+  const existing = await ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ key: keyToLookup }), sessionOptions(ctx));
   if (existing) return existing;
   if (offsetKey) {
     throw new ValidationError(`Offset account '${offsetKey}' not found`);
   }
   const now = /* @__PURE__ */ new Date();
-  const doc = {
+  const doc = withChrStatusDocument({
     _id: new mongodb.ObjectId(),
     ...DEFAULT_OPENING_BALANCE_ACCOUNT,
     createdAt: now,
     updatedAt: now
-  };
+  });
   await ctx.db.collection(COLLECTION).insertOne(doc, sessionOptions(ctx));
   return doc;
 }
 async function voidExistingOpeningBalance(accountKey, ctx) {
   const existing = await ctx.db.collection("acct_journals").findOne(
-    {
+    withChrStatusFilter({
       referenceType: OPENING_BALANCE_REFERENCE_TYPE,
       referenceId: accountKey,
       voided: false
-    },
+    }),
     sessionOptions(ctx)
   );
   if (existing) {
@@ -280,20 +343,20 @@ function createAccount(data, ctx) {
     if (!data) throw new ValidationError("Data object is required");
     validateAccountStructure(data);
     if (data.parentAccountKey) {
-      const parent = await ctx.db.collection(COLLECTION).findOne({ key: data.parentAccountKey }, sessionOptions(ctx));
+      const parent = await ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ key: data.parentAccountKey }), sessionOptions(ctx));
       if (!parent) {
         throw new ValidationError(`Parent account '${data.parentAccountKey}' not found`);
       }
     }
     const existing = await ctx.db.collection(COLLECTION).findOne(
-      { $or: [{ key: data.key }, { code: data.code }] },
+      withChrStatusFilter({ $or: [{ key: data.key }, { code: data.code }] }),
       sessionOptions(ctx)
     );
     if (existing) {
       throw new ValidationError(`Account with key '${data.key}' or code '${data.code}' already exists`);
     }
     const now = /* @__PURE__ */ new Date();
-    const doc = {
+    const doc = withChrStatusDocument({
       _id: new mongodb.ObjectId(),
       ...data,
       origin: data.origin,
@@ -304,7 +367,7 @@ function createAccount(data, ctx) {
       isActive: true,
       createdAt: now,
       updatedAt: now
-    };
+    });
     await ctx.db.collection(COLLECTION).insertOne(doc, sessionOptions(ctx));
     return doc;
   });
@@ -323,7 +386,7 @@ function updateAccount(data, ctx) {
       updateFields.parentAccountKey = data.parentAccountKey;
     }
     const result = await ctx.db.collection(COLLECTION).findOneAndUpdate(
-      { key: data.key },
+      withChrStatusFilter({ key: data.key }),
       { $set: updateFields },
       { ...sessionOptions(ctx), returnDocument: "after" }
     );
@@ -338,18 +401,18 @@ function deactivateAccount(key, ctx) {
 }
 function getAccountByKey(key, ctx) {
   return execute(async () => {
-    return ctx.db.collection(COLLECTION).findOne({ key }, sessionOptions(ctx));
+    return ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ key }), sessionOptions(ctx));
   });
 }
 function getAccountByCode(code, ctx) {
   return execute(async () => {
-    return ctx.db.collection(COLLECTION).findOne({ code }, sessionOptions(ctx));
+    return ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ code }), sessionOptions(ctx));
   });
 }
 function listAccounts(filter, ctx) {
   return execute(async () => {
     const { limit = 100, skip = 0, ...query } = filter;
-    return ctx.db.collection(COLLECTION).find(query, sessionOptions(ctx)).skip(skip).limit(limit).toArray();
+    return ctx.db.collection(COLLECTION).find(withChrStatusFilter(query), sessionOptions(ctx)).skip(skip).limit(limit).toArray();
   });
 }
 function applyOpeningBalance(data, ctx) {
@@ -358,7 +421,7 @@ function applyOpeningBalance(data, ctx) {
     if (data.amount === void 0 || data.amount === null || Number.isNaN(data.amount)) {
       throw new ValidationError("Opening balance amount is required");
     }
-    const account = await ctx.db.collection(COLLECTION).findOne({ key: data.accountKey }, sessionOptions(ctx));
+    const account = await ctx.db.collection(COLLECTION).findOne(withChrStatusFilter({ key: data.accountKey }), sessionOptions(ctx));
     if (!account) {
       throw new AccountNotFoundError(data.accountKey);
     }
@@ -399,7 +462,7 @@ function applyOpeningBalance(data, ctx) {
 }
 function getAccountHierarchy(ctx) {
   return execute(async () => {
-    const accounts = await ctx.db.collection(COLLECTION).find({}, sessionOptions(ctx)).toArray();
+    const accounts = await ctx.db.collection(COLLECTION).find(withChrStatusFilter({}), sessionOptions(ctx)).toArray();
     const accountMap = /* @__PURE__ */ new Map();
     accounts.forEach((acc) => {
       accountMap.set(acc.key, { ...acc, children: [] });
@@ -417,6 +480,63 @@ function getAccountHierarchy(ctx) {
     return roots;
   });
 }
+function getChartOfAccounts(ctx) {
+  return getAccountHierarchy(ctx);
+}
+async function findAccountByIdentifier(identifier, ctx) {
+  const query = { key: identifier };
+  if (identifier instanceof mongodb.ObjectId || typeof identifier === "string" && mongodb.ObjectId.isValid(identifier)) {
+    const _id = identifier instanceof mongodb.ObjectId ? identifier : new mongodb.ObjectId(identifier);
+    query.$or = [{ key: identifier }, { _id }];
+    delete query.key;
+  }
+  const account = await ctx.db.collection(COLLECTION).findOne(withChrStatusFilter(query), sessionOptions(ctx));
+  if (!account) {
+    throw new AccountNotFoundError(typeof identifier === "string" ? identifier : identifier.toHexString());
+  }
+  return account;
+}
+function getChildAccounts(identifier, ctx) {
+  return execute(async () => {
+    const account = await findAccountByIdentifier(identifier, ctx);
+    const accounts = await ctx.db.collection(COLLECTION).find(withChrStatusFilter({}), sessionOptions(ctx)).toArray();
+    const childrenMap = /* @__PURE__ */ new Map();
+    accounts.forEach((acc) => {
+      if (!acc.parentAccountKey) return;
+      const siblings = childrenMap.get(acc.parentAccountKey) || [];
+      siblings.push(acc);
+      childrenMap.set(acc.parentAccountKey, siblings);
+    });
+    const descendants = [];
+    const stack = [account.key];
+    while (stack.length > 0) {
+      const currentKey = stack.pop();
+      const children = childrenMap.get(currentKey) || [];
+      children.forEach((child) => {
+        descendants.push(child);
+        stack.push(child.key);
+      });
+    }
+    return descendants;
+  });
+}
+function getParentAccounts(identifier, ctx) {
+  return execute(async () => {
+    const accounts = await ctx.db.collection(COLLECTION).find(withChrStatusFilter({}), sessionOptions(ctx)).toArray();
+    const accountMap = /* @__PURE__ */ new Map();
+    accounts.forEach((acc) => accountMap.set(acc.key, acc));
+    const account = await findAccountByIdentifier(identifier, ctx);
+    const parents = [];
+    let currentKey = account.parentAccountKey;
+    while (currentKey) {
+      const parent = accountMap.get(currentKey);
+      if (!parent) break;
+      parents.push(parent);
+      currentKey = parent.parentAccountKey || null;
+    }
+    return parents;
+  });
+}
 
 // src/reports/index.ts
 var TX_COLLECTION2 = "acct_transactions";
@@ -428,10 +548,10 @@ var getNetBalance = (debit, credit, type, parentGroup) => {
 };
 function getAccountBalance(data, ctx) {
   return execute(async () => {
-    const match = {
+    const match = withChrStatusFilter({
       accountKey: data.accountKey,
       voided: false
-    };
+    });
     if (data.from || data.to) {
       match.datetime = {};
       if (data.from) match.datetime.$gte = data.from;
@@ -457,7 +577,7 @@ function getAccountBalance(data, ctx) {
     }
     const { debit, credit } = result[0];
     const account = await ctx.db.collection(ACCT_COLLECTION2).findOne(
-      { key: data.accountKey },
+      withChrStatusFilter({ key: data.accountKey }),
       { projection: { type: 1, parentGroup: 1 }, session: ctx.session }
     );
     if (!account) throw new Error(`Account ${data.accountKey} not found`);
@@ -482,10 +602,10 @@ function getAccountLedger(data, ctx) {
       }, ctx);
       openingBalance = preRes.balance;
     }
-    const match = {
+    const match = withChrStatusFilter({
       accountKey: data.accountKey,
       voided: false
-    };
+    });
     if (data.from || data.to) {
       match.datetime = {};
       if (data.from) match.datetime.$gte = data.from;
@@ -498,7 +618,7 @@ function getAccountLedger(data, ctx) {
     }
     const items = await ctx.db.collection(TX_COLLECTION2).find(match, { session: ctx.session }).sort({ datetime: 1, _id: 1 }).skip(skip).limit(pageSize).toArray();
     const account = await ctx.db.collection(ACCT_COLLECTION2).findOne(
-      { key: data.accountKey },
+      withChrStatusFilter({ key: data.accountKey }),
       { session: ctx.session }
     );
     if (!account) throw new Error("Account not found");
@@ -522,7 +642,7 @@ function getAccountLedger(data, ctx) {
 }
 function getTrialBalance(data, ctx) {
   return execute(async () => {
-    const match = { voided: false };
+    const match = withChrStatusFilter({ voided: false });
     if (data.from || data.to) {
       match.datetime = {};
       if (data.from) match.datetime.$gte = data.from;
@@ -538,7 +658,7 @@ function getTrialBalance(data, ctx) {
         }
       }
     ], { session: ctx.session }).toArray();
-    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find({}, { session: ctx.session }).toArray();
+    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find(withChrStatusFilter({}), { session: ctx.session }).toArray();
     const accountMap = new Map(accounts.map((a) => [a.key, a]));
     const lines = [];
     let grandTotalDebit = 0;
@@ -572,16 +692,16 @@ function getProfitAndLoss(data, ctx) {
   return execute(async () => {
     const fromDate = data.from || /* @__PURE__ */ new Date(0);
     const toDate = data.to || /* @__PURE__ */ new Date();
-    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find({
+    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find(withChrStatusFilter({
       parentGroup: { $in: ["income", "expense"] }
-    }, { session: ctx.session }).toArray();
+    }), { session: ctx.session }).toArray();
     const accountKeys = accounts.map((a) => a.key);
     const acctMap = new Map(accounts.map((a) => [a.key, a]));
-    const match = {
+    const match = withChrStatusFilter({
       accountKey: { $in: accountKeys },
       voided: false,
       datetime: { $gte: fromDate, $lte: toDate }
-    };
+    });
     if (data.metaFilter) {
       for (const [k, v] of Object.entries(data.metaFilter)) {
         match[`meta.${k}`] = v;
@@ -632,10 +752,10 @@ function getBalanceSheet(data, ctx) {
   return execute(async () => {
     const aggr = await ctx.db.collection(TX_COLLECTION2).aggregate([
       {
-        $match: {
+        $match: withChrStatusFilter({
           voided: false,
           datetime: { $lte: data.asOf }
-        }
+        })
       },
       {
         $group: {
@@ -645,7 +765,7 @@ function getBalanceSheet(data, ctx) {
         }
       }
     ], { session: ctx.session }).toArray();
-    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find({}, { session: ctx.session }).toArray();
+    const accounts = await ctx.db.collection(ACCT_COLLECTION2).find(withChrStatusFilter({}), { session: ctx.session }).toArray();
     const acctMap = new Map(accounts.map((a) => [a.key, a]));
     const assetsBreakdown = {};
     const liabBreakdown = {};
@@ -699,19 +819,22 @@ function ensureAccountingIndexes(ctx) {
       { key: { key: 1 }, unique: true },
       { key: { code: 1 }, unique: true },
       { key: { type: 1 } },
-      { key: { parentGroup: 1 } }
+      { key: { parentGroup: 1 } },
+      { key: { chrStatus: 1 } }
     ], { session: ctx.session });
     const p2 = ctx.db.collection(JOURNAL_COLLECTION2).createIndexes([
       { key: { datetime: 1 } },
-      { key: { referenceType: 1, referenceId: 1 } }
+      { key: { referenceType: 1, referenceId: 1 } },
+      { key: { chrStatus: 1 } }
     ], { session: ctx.session });
     const p3 = ctx.db.collection(TX_COLLECTION3).createIndexes([
       { key: { accountKey: 1, datetime: 1 } },
       // For getting balance/ledger
       { key: { journalId: 1 } },
       // For getting journal details
-      { key: { "meta.customerId": 1 }, sparse: true }
+      { key: { "meta.customerId": 1 }, sparse: true },
       // Example loose index
+      { key: { chrStatus: 1 } }
     ], { session: ctx.session });
     const results = await Promise.all([p1, p2, p3]);
     return results.flat();
@@ -724,11 +847,13 @@ function seedAccounts(accounts, ctx) {
         filter: { key: acct.key },
         update: {
           $setOnInsert: {
-            ...acct,
-            _id: new mongodb.ObjectId(),
-            isActive: true,
-            createdAt: /* @__PURE__ */ new Date(),
-            updatedAt: /* @__PURE__ */ new Date()
+            ...withChrStatusDocument({
+              ...acct,
+              _id: new mongodb.ObjectId(),
+              isActive: true,
+              createdAt: /* @__PURE__ */ new Date(),
+              updatedAt: /* @__PURE__ */ new Date()
+            })
           }
         },
         upsert: true
@@ -737,7 +862,7 @@ function seedAccounts(accounts, ctx) {
     if (ops.length > 0) {
       await ctx.db.collection(ACCT_COLLECTION3).bulkWrite(ops, { session: ctx.session });
     }
-    return ctx.db.collection(ACCT_COLLECTION3).find({ key: { $in: accounts.map((a) => a.key) } }, { session: ctx.session }).toArray();
+    return ctx.db.collection(ACCT_COLLECTION3).find(withChrStatusFilter({ key: { $in: accounts.map((a) => a.key) } }), { session: ctx.session }).toArray();
   });
 }
 
@@ -756,7 +881,10 @@ exports.getAccountByKey = getAccountByKey;
 exports.getAccountHierarchy = getAccountHierarchy;
 exports.getAccountLedger = getAccountLedger;
 exports.getBalanceSheet = getBalanceSheet;
+exports.getChartOfAccounts = getChartOfAccounts;
+exports.getChildAccounts = getChildAccounts;
 exports.getJournal = getJournal;
+exports.getParentAccounts = getParentAccounts;
 exports.getProfitAndLoss = getProfitAndLoss;
 exports.getTrialBalance = getTrialBalance;
 exports.listAccounts = listAccounts;
@@ -764,5 +892,6 @@ exports.postJournal = postJournal;
 exports.seedAccounts = seedAccounts;
 exports.updateAccount = updateAccount;
 exports.voidJournal = voidJournal;
+exports.voidJournalsByIdentifier = voidJournalsByIdentifier;
 //# sourceMappingURL=index.cjs.map
 //# sourceMappingURL=index.cjs.map
